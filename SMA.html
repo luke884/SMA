@@ -38,13 +38,13 @@
         .sell-text { color: var(--danger); font-weight: bold; }
         .final-text { color: #8e44ad; font-weight: bold; font-style: italic; }
         
-        #chartContainer { width: 100%; height: 500px; margin-top: 10px; }
+        #chartContainer { width: 100%; height: 550px; margin-top: 10px; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>SMA 均線回測 </h1>
+    <h1>SMA 均線回測系統 </h1>
 
     <div class="input-section">
         <div class="input-group"><label>初始資金</label><input id="initialCash" type="number" value="10000"></div>
@@ -66,7 +66,7 @@
             <h3>🏆 排行榜 (Top 20)</h3>
             <div class="rank-table-wrapper">
                 <table id="topTable">
-                    <thead><tr><th>排名</th><th>短/長</th><th>最終資產 </th></tr></thead>
+                    <thead><tr><th>排名</th><th>短/長</th><th>最終資產</th></tr></thead>
                     <tbody></tbody>
                 </table>
             </div>
@@ -85,14 +85,10 @@
 </div>
 
 <script>
-    let g_backtestData = [];
-    let g_allSma = {};
-    let g_startIdx = 0;
-    let g_initialCash = 0;
-    let chartInstance = null;
+    let g_backtestData = [], g_allSma = {}, g_startIdx = 0, g_initialCash = 0, chartInstance = null;
     const MAX_PERIOD = 256;
 
-    // 修正：顯示小數點後兩位，並加上千分位
+
     function formatCurrency(num) {
         return num.toLocaleString('zh-TW', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
@@ -111,14 +107,13 @@
             const lines = event.target.result.trim().split("\n");
             window.csvHeaders = lines[0].split(",").map(h => h.trim());
             window.csvRaw = lines.slice(1).map(line => line.split(","));
-            const select = document.getElementById("companySelect");
-            select.innerHTML = window.csvHeaders.slice(1).map(h => `<option value="${h}">${h}</option>`).join('');
+            document.getElementById("companySelect").innerHTML = window.csvHeaders.slice(1).map(h => `<option value="${h}">${h}</option>`).join('');
         };
         reader.readAsText(e.target.files[0]);
     });
 
     function precomputeSMA(data, period) {
-        let sma = []; let sum = 0;
+        let sma = [], sum = 0;
         for (let i = 0; i < data.length; i++) {
             sum += data[i].close;
             if (i >= period) sum -= data[i - period].close;
@@ -129,26 +124,36 @@
 
     function backtest(data, smaS, smaL, initialCash, startIdx, recordTrades = false) {
         let cash = initialCash, shares = 0, distCap = 0, hasPos = false;
-        let maxValue = initialCash, maxDD = 0;
-        let trades = [];
+        let maxValue = initialCash, maxDD = 0, trades = [], allCrosses = [];
 
         for (let i = startIdx; i < data.length; i++) {
             const price = data[i].close;
             const isLastDay = (i === data.length - 1);
             
-            if (!hasPos && !isLastDay && i > 0 && smaS[i-1] < smaL[i-1] && smaS[i] >= smaL[i]) {
-                shares = Math.floor(cash / price);
-                if (shares > 0) {
-                    distCap = cash; cash -= (shares * price); hasPos = true;
-                    if (recordTrades) trades.push({ date: data[i].date, action: '買入', price, shares });
+            if (i > 0 && smaS[i-1] !== null && smaL[i-1] !== null) {
+                // 標註金叉 (交叉點定為兩條均線的平均值，或是 smaS 當前值，能精確落在線上)
+                if (smaS[i-1] < smaL[i-1] && smaS[i] >= smaL[i]) {
+                    allCrosses.push({ date: data[i].date, type: 'gold', val: smaS[i] });
+                    if (!hasPos && !isLastDay) {
+                        shares = Math.floor(cash / price);
+                        if (shares > 0) {
+                            distCap = cash; cash -= (shares * price); hasPos = true;
+                            if (recordTrades) trades.push({ date: data[i].date, action: '買入', price, shares });
+                        }
+                    }
+                } 
+                // 標註死叉
+                else if (smaS[i-1] > smaL[i-1] && smaS[i] <= smaL[i]) {
+                    allCrosses.push({ date: data[i].date, type: 'death', val: smaS[i] });
+                    if (hasPos) {
+                        let sellVal = shares * price;
+                        if (recordTrades) trades.push({ date: data[i].date, action: '賣出', price, shares, profit: (cash + sellVal) - distCap });
+                        cash += sellVal; shares = 0; hasPos = false;
+                    }
                 }
-            } 
-            else if (hasPos && i > 0 && smaS[i-1] > smaL[i-1] && smaS[i] <= smaL[i]) {
-                let sellVal = shares * price;
-                if (recordTrades) trades.push({ date: data[i].date, action: '賣出', price, shares, profit: (cash + sellVal) - distCap });
-                cash += sellVal; shares = 0; hasPos = false;
             }
-            else if (hasPos && isLastDay) {
+            
+            if (hasPos && isLastDay) {
                 let sellVal = shares * price;
                 if (recordTrades) trades.push({ date: data[i].date, action: '賣出(平倉)', price, shares, profit: (cash + sellVal) - distCap });
                 cash += sellVal; shares = 0; hasPos = false;
@@ -157,7 +162,7 @@
             maxValue = Math.max(maxValue, currentVal);
             maxDD = Math.max(maxDD, (maxValue - currentVal) / maxValue);
         }
-        return { finalAsset: cash, maxDD: maxDD * 100, trades };
+        return { finalAsset: cash, maxDD: maxDD * 100, trades, allCrosses };
     }
 
     async function runOptimization() {
@@ -166,20 +171,16 @@
         const company = document.getElementById('companySelect').value;
         const sInt = dateToInt(document.getElementById('startDate').value);
         const eInt = dateToInt(document.getElementById('endDate').value);
-
+        
         if (!window.csvRaw) return alert("請先上傳 CSV");
 
         let data = window.csvRaw.map(r => ({ date: r[0], close: parseFloat(r[window.csvHeaders.indexOf(company)]) }))
-                             .filter(d => !isNaN(d.close))
-                             .sort((a, b) => dateToInt(a.date) - dateToInt(b.date));
-
+                             .filter(d => !isNaN(d.close)).sort((a, b) => dateToInt(a.date) - dateToInt(b.date));
         g_startIdx = data.findIndex(d => dateToInt(d.date) >= sInt);
         const endIdx = data.findLastIndex(d => dateToInt(d.date) <= eInt);
         g_backtestData = data.slice(0, endIdx + 1);
 
-        btn.disabled = true;
-        document.getElementById('progWrapper').style.display = 'block';
-
+        btn.disabled = true; document.getElementById('progWrapper').style.display = 'block';
         g_allSma = {};
         for (let p = 1; p <= MAX_PERIOD; p++) g_allSma[p] = precomputeSMA(g_backtestData, p);
 
@@ -195,11 +196,10 @@
             }
         }
 
-        // --- C++ 邏輯排序 (不變) ---
+
         results.sort((a, b) => {
             if (Math.abs(a.finalAsset - b.finalAsset) > 0.01) return b.finalAsset - a.finalAsset;
-            let diffA = Math.abs(a.s - a.l);
-            let diffB = Math.abs(b.s - b.l);
+            let diffA = Math.abs(a.s - a.l), diffB = Math.abs(b.s - b.l);
             if (diffA !== diffB) return diffB - diffA; 
             if (a.s !== b.s) return a.s - b.s;
             return a.l - b.l;
@@ -207,14 +207,11 @@
 
         updateRankTable(results.slice(0, 20)); 
         showSpecificResult(results[0].s, results[0].l, 1);
-
-        btn.disabled = false;
-        document.getElementById('progWrapper').style.display = 'none';
+        btn.disabled = false; document.getElementById('progWrapper').style.display = 'none';
     }
 
     function updateRankTable(top) {
-        const tbody = document.querySelector("#topTable tbody");
-        tbody.innerHTML = top.map((r, i) => 
+        document.querySelector("#topTable tbody").innerHTML = top.map((r, i) => 
             `<tr onclick="showSpecificResult(${r.s}, ${r.l}, ${i+1}, this)">
                 <td>${i+1}</td><td>${r.s}/${r.l}</td><td>$${formatCurrency(r.finalAsset)}</td>
             </tr>`).join('');
@@ -239,10 +236,10 @@
                 <td>${t.profit ? '$' + formatCurrency(t.profit) : '-'}</td>
             </tr>
         `).join('');
-        renderChart(g_backtestData.slice(g_startIdx), g_allSma[s].slice(g_startIdx), g_allSma[l].slice(g_startIdx), detailed.trades, s, l);
+        renderChart(g_backtestData.slice(g_startIdx), g_allSma[s].slice(g_startIdx), g_allSma[l].slice(g_startIdx), detailed.trades, detailed.allCrosses, s, l);
     }
 
-    function renderChart(data, sS, sL, trades, sVal, lVal) {
+    function renderChart(data, sS, sL, trades, allCrosses, sVal, lVal) {
         const ctx = document.getElementById('mainChart').getContext('2d');
         if (chartInstance) chartInstance.destroy();
         chartInstance = new Chart(ctx, {
@@ -250,14 +247,28 @@
             data: {
                 labels: data.map(d => d.date),
                 datasets: [
-                    { label: '買入', data: data.map(d => trades.find(t => t.date === d.date && t.action === '買入') ? d.close : null), borderColor: 'green', backgroundColor: 'green', pointStyle: 'triangle', pointRadius: 8, showLine: false },
-                    { label: '賣出/平倉', data: data.map(d => trades.find(t => t.date === d.date && (t.action === '賣出' || t.action === '賣出(平倉)')) ? d.close : null), borderColor: 'red', backgroundColor: 'red', pointStyle: 'rectRot', pointRadius: 8, showLine: false },
-                    { label: '收盤價', data: data.map(d => d.close), borderColor: '#ddd', borderWidth: 1, pointRadius: 0 },
-                    { label: `SMA ${sVal}`, data: sS, borderColor: '#e74c3c', borderWidth: 2, pointRadius: 0 },
-                    { label: `SMA ${lVal}`, data: sL, borderColor: '#3498db', borderWidth: 2, pointRadius: 0 }
+                    { label: '實際買入', data: data.map(d => trades.find(t => t.date === d.date && t.action === '買入') ? d.close : null), borderColor: '#27ae60', backgroundColor: '#27ae60', pointStyle: 'triangle', pointRadius: 10, showLine: false, z: 10 },
+                    { label: '實際賣出/平倉', data: data.map(d => trades.find(t => t.date === d.date && (t.action === '賣出' || t.action === '賣出(平倉)')) ? d.close : null), borderColor: '#e74c3c', backgroundColor: '#e74c3c', pointStyle: 'rectRot', pointRadius: 10, showLine: false, z: 10 },
+                    { label: '黃金交叉', data: data.map(d => {
+                        const cross = allCrosses.find(c => c.date === d.date && c.type === 'gold');
+                        return cross ? cross.val : null;
+                    }), borderColor: '#f1c40f', pointStyle: 'circle', pointRadius: 5, showLine: false, z: 5 },
+                    { label: '死亡交叉', data: data.map(d => {
+                        const cross = allCrosses.find(c => c.date === d.date && c.type === 'death');
+                        return cross ? cross.val : null;
+                    }), borderColor: '#95a5a6', pointStyle: 'circle', pointRadius: 5, showLine: false, z: 5 },
+                    { label: '收盤價', data: data.map(d => d.close), borderColor: '#ddd', borderWidth: 1, pointRadius: 0, z: 1 },
+                    { label: `SMA ${sVal}`, data: sS, borderColor: '#e74c3c', borderWidth: 2, pointRadius: 0, z: 2 },
+                    { label: `SMA ${lVal}`, data: sL, borderColor: '#3498db', borderWidth: 2, pointRadius: 0, z: 2 }
                 ]
             },
-            options: { responsive: true, maintainAspectRatio: false }
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { labels: { usePointStyle: true } }
+                }
+            }
         });
     }
 </script>
